@@ -167,12 +167,19 @@ class TimeTable:
         suffix = f'_{protocol.version}' if protocol and protocol.version else ''
         encoded_params = base64.b64encode(f"{code0}_{school_code}_0_{week_num + 1}{suffix}".encode('utf-8'))
         endpoint = comcigan_code.split('?', 1)[0]
-        request_url = f'{COMCIGAN_URL}{endpoint}?{encoded_params.decode("ascii")}'
+        if protocol is not None and protocol.request_method == 'POST':
+            request_url = f'{COMCIGAN_URL}{endpoint}'
+            body = encoded_params
+        else:
+            request_url = f'{COMCIGAN_URL}{endpoint}?{encoded_params.decode("ascii")}'
+            body = None
 
         if protocol is not None and protocol.request_token is not None:
-            response = get_response_encoding(request_url, 'UTF-8', request_token=protocol.request_token)
+            response = get_response_encoding(request_url, 'UTF-8', request_token=protocol.request_token,
+                                             data=body, content_type='text/plain; charset=UTF-8' if body else None)
         else:
-            response = get_response_encoding(request_url, 'UTF-8')
+            response = get_response_encoding(request_url, 'UTF-8', data=body,
+                                             content_type='text/plain; charset=UTF-8' if body else None)
 
         # Authenticate encrypted responses before parsing their JSON payload.
         data = decode_response(response.text, protocol.key if protocol else None,

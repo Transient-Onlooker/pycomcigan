@@ -9,11 +9,26 @@ from .encrypted_response import RESPONSE_VERSION
 
 _FUNCTION = re.compile(r'\bfunction\s+(?P<name>[\w$]+)\s*\([^)]*\)\s*\{')
 _SCHOOL_REQUEST = re.compile(
-    r"url\s*:\s*'\.(/[0-9]+)\?'\s*\+\s*encodeURIComponent\(\s*btoa\(\s*"
-    rf"'([0-9]+l)'\s*\+\s*encodeURIComponent\(\s*sc\s*\)\s*\+\s*'_({RESPONSE_VERSION})'\s*\)\s*\)"
+    r"url\s*:\s*'\.(?P<endpoint>/[0-9]+)\?'\s*\+\s*encodeURIComponent\(\s*btoa\(\s*"
+    rf"'(?P<prefix>[0-9]+l)'\s*\+\s*encodeURIComponent\(\s*sc\s*\)\s*\+\s*'_(?P<version>{RESPONSE_VERSION})'\s*\)\s*\)"
 )
 _TIMETABLE_REQUEST = re.compile(
-    rf"url\s*:\s*'\.(/[0-9]+)\?'\s*\+\s*btoa\([^;{{}}]*?'_({RESPONSE_VERSION})'\s*\)"
+    rf"url\s*:\s*'\.(?P<endpoint>/[0-9]+)\?'\s*\+\s*btoa\([^;{{}}]*?'_(?P<version>{RESPONSE_VERSION})'\s*\)"
+)
+# Current pages POST the encoded request as the body instead of a GET query:
+# the school search posts encodeURIComponent(btoa('<digits>l' + name + '_<version>'))
+# to './<digits>' and the timetable posts btoa('<prefix>_<code>_0_<week>_<version>').
+_SCHOOL_REQUEST_POST = re.compile(
+    r"var\s+(?P<var>[\w$]+)\s*=\s*'(?P<prefix>[0-9]+l)'\s*\+\s*encodeURIComponent\(\s*sc\s*\)"
+    r"[\s\S]{0,800}?"
+    rf"url\s*:\s*'\.(?P<endpoint>/[0-9]+)'"
+    r"[\s\S]{0,800}?"
+    rf"data\s*:\s*encodeURIComponent\(\s*btoa\(\s*(?P=var)\s*\+\s*'_(?P<version>{RESPONSE_VERSION})'\s*\)\s*\)"
+)
+_TIMETABLE_REQUEST_POST = re.compile(
+    rf"url\s*:\s*'\.(?P<endpoint>/[0-9]+)'"
+    r"[\s\S]{0,800}?"
+    rf"data\s*:\s*btoa\([^;{{}}]*?\+\s*r\s*\+\s*'_(?P<version>{RESPONSE_VERSION})'\s*\)"
 )
 
 
@@ -29,6 +44,8 @@ class ServiceProtocol:
     start_date_field: Optional[str] = None
     period_times_field: Optional[str] = None
     timetable_prefix: Optional[str] = None
+    # 'GET' for the legacy query-string form, 'POST' for the current body form.
+    request_method: str = 'GET'
 
 
 def parse_service_protocol(content: str) -> ServiceProtocol:
@@ -46,8 +63,30 @@ def parse_service_protocol(content: str) -> ServiceProtocol:
         (section, match)
         for name, section in functions
         if (not named_school or name == 'QAjaxSchool')
-        for match in _SCHOOL_REQUEST.finditer(section)
+        for match in _SCHOOL_REQUEST_POST.finditer(section)
     ]
+    timetable_requests = [
+        (name, section, match)
+        for name, section in functions
+        if not named_school or name == 'QAjaxTimetable'
+        for match in _TIMETABLE_REQUEST_POST.finditer(section)
+    ]
+    request_method = 'POST'
+    if not school_requests:
+        # Legacy pages send the encoded request as a GET query string.
+        school_requests = [
+            (section, match)
+            for name, section in functions
+            if (not named_school or name == 'QAjaxSchool')
+            for match in _SCHOOL_REQUEST.finditer(section)
+        ]
+        timetable_requests = [
+            (name, section, match)
+            for name, section in functions
+            if not named_school or name == 'QAjaxTimetable'
+            for match in _TIMETABLE_REQUEST.finditer(section)
+        ]
+        request_method = 'GET'
     if not school_requests and not named_school and 'CryptoJS.enc.Hex.parse' not in content:
         match = re.search(r'\.(/\d+\?\d+l)', content)
         if match is None:
@@ -56,15 +95,13 @@ def parse_service_protocol(content: str) -> ServiceProtocol:
     if len(school_requests) != 1:
         raise RuntimeError('Unable to parse Comcigan school request protocol')
     school_section, request = school_requests[0]
-    endpoint, prefix, version = request.groups()
+    endpoint = request.group('endpoint')
+    prefix = request.group('prefix')
+    version = request.group('version')
 
-    timetable_requests = [
-        (name, section, match)
-        for name, section in functions
-        if not named_school or name == 'QAjaxTimetable'
-        for match in _TIMETABLE_REQUEST.finditer(section)
-    ]
-    if len(timetable_requests) != 1 or timetable_requests[0][2].groups() != (endpoint, version):
+    if (len(timetable_requests) != 1
+            or (timetable_requests[0][2].group('endpoint'),
+                timetable_requests[0][2].group('version')) != (endpoint, version)):
         raise RuntimeError(
             'Comcigan service page structure changed: school and timetable request protocols do not match'
         )
@@ -143,4 +180,5 @@ def parse_service_protocol(content: str) -> ServiceProtocol:
         raise RuntimeError('Conflicting Comcigan timetable request prefixes')
     return ServiceProtocol(endpoint + '?' + prefix, bytes.fromhex(key_hex), version,
                            school_divisor, school_offset, request_token,
-                           text_key, start_date_field, period_times_field, next(iter(prefixes), None))
+                           text_key, start_date_field, period_times_field, next(iter(prefixes), None),
+                           request_method)
